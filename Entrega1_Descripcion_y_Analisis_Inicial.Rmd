@@ -1,0 +1,475 @@
+---
+title: "Entrega 1: Descripcion y Analisis Inicial de los Datos"
+author: "Carlos Alonso Gomez Reyes (A00841169), Jose Manuel Pulido Perez (A01178806), Jaime Emilio Garza Rodriguez (A00843320)"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+Este documento esta organizado en las 5 instrucciones de la Entrega 1, cada una en su propia seccion claramente marcada:
+
+1. Adquisicion y Limpieza de Datos (2 pts)
+2. Identificacion de Variables Dependientes e Independientes (2 pts)
+3. Evaluacion de Tecnologias de Informacion (2 pts)
+4. Analisis del Perfil de Riesgo del Cliente (2 pts)
+5. Primera Visualizacion y Descripcion de los Datos (2 pts)
+
+## Paquetes requeridos
+
+Instalamos (si hace falta) y cargamos las librerias necesarias.
+
+```{r librerias}
+paquetes_requeridos <- c("dplyr", "readr", "stringr", "tidyr", "purrr",
+                          "zoo", "DBI", "RSQLite", "ggplot2", "tibble", "scales")
+faltantes <- paquetes_requeridos[!paquetes_requeridos %in% installed.packages()[, "Package"]]
+if (length(faltantes) > 0) install.packages(faltantes)
+invisible(lapply(paquetes_requeridos, library, character.only = TRUE))
+```
+
+# 1. Adquisicion y Limpieza de Datos (2 pts)
+
+**Adquisicion:** se utilizan los historicos de precio diario de 10 acciones (AMD, Apple, Coca-Cola, Intel, Meta, Micron, Microsoft, NVIDIA, Taiwan Semiconductor y Walmart), exportados como CSV a partir de un proveedor de datos financieros (formato equivalente al de Yahoo Finance / Investing.com: Fecha, Apertura, Maximo, Minimo, Cierre, Volumen y Cambio %). **Los 10 archivos CSV deben estar guardados en el Escritorio** de tu computadora, con el mismo nombre con el que se descargaron.
+
+**Limpieza:** se convierten los tipos de dato, se eliminan duplicados, se interpolan/eliminan valores faltantes y se descartan precios o volumenes invalidos, dejando un data frame listo para el analisis.
+
+## 1.1 Carga y combinacion de archivos CSV
+
+Leemos los CSV de las 10 acciones directamente desde el Escritorio.
+
+```{r carga-datos}
+# Detecta la ruta del Escritorio en Windows o Mac/Linux
+obtener_escritorio <- function() {
+  sysname <- Sys.info()[["sysname"]]
+  if (sysname == "Windows") {
+    file.path(Sys.getenv("USERPROFILE"), "Desktop")
+  } else {
+    file.path(Sys.getenv("HOME"), "Desktop")
+  }
+}
+
+ruta_escritorio <- obtener_escritorio()
+cat("Leyendo archivos desde:", ruta_escritorio, "\n")
+
+archivos_csv <- c(
+  "AMD Stock Price History.csv",
+  "Apple Stock Price History.csv",
+  "Coca-Cola Stock Price History.csv",
+  "Intel Stock Price History.csv",
+  "Meta Platforms Stock Price History.csv",
+  "Micron Stock Price History.csv",
+  "Microsoft Stock Price History.csv",
+  "NVIDIA Stock Price History.csv",
+  "Taiwan Semiconductor Stock Price History.csv",
+  "Walmart Stock Price History.csv"
+)
+
+leer_accion <- function(nombre_archivo) {
+  ticker <- stringr::str_split(nombre_archivo, " Stock")[[1]][1]
+  ruta <- file.path(ruta_escritorio, nombre_archivo)
+  cat("Procesando archivo:", nombre_archivo, "\n")
+  df_ticker <- readr::read_csv(ruta, col_types = readr::cols(.default = "c"))
+  df_ticker$Ticker <- ticker
+  df_ticker
+}
+
+lista_df <- purrr::map(archivos_csv, leer_accion)
+df <- dplyr::bind_rows(lista_df)
+
+cat("\nTodos los archivos se cargaron y combinaron correctamente\n")
+cat("Encabezado del data frame inicial:\n")
+head(df)
+cat("Dimensiones iniciales:", paste(dim(df), collapse = " x "), "\n")
+```
+
+## 1.2 Limpieza de los datos
+
+Se realizan las siguientes operaciones de limpieza sobre el data frame combinado:
+
+- Conversion de tipos de datos (fechas, volumen con sufijos `M`/`K`, cambio % con simbolo `%`).
+- Eliminacion de filas duplicadas (mismo Ticker y Fecha).
+- Manejo de valores faltantes: interpolacion acotada y eliminacion de filas que no se pudieron completar.
+- Eliminacion de precios invalidos (negativos o cero) y volumenes negativos.
+
+```{r limpieza}
+# --- 1.2.1 Conversion de tipos de datos ---
+df <- df %>% dplyr::mutate(Date = as.Date(Date, format = "%m/%d/%Y"))
+
+filas_antes <- nrow(df)
+df <- df %>% dplyr::filter(!is.na(Date))
+if (filas_antes - nrow(df) > 0) {
+  cat("Se eliminaron", filas_antes - nrow(df), "filas por formato de fecha invalido\n")
+}
+
+# Vol. (ej. '17.07M' -> 17070000)
+limpiar_volumen <- function(x) {
+  x <- stringr::str_trim(x)
+  x <- ifelse(is.na(x) | x == "", NA_character_, x)
+  dplyr::case_when(
+    stringr::str_detect(x, "M$") ~ suppressWarnings(as.numeric(stringr::str_remove(x, "M"))) * 1e6,
+    stringr::str_detect(x, "K$") ~ suppressWarnings(as.numeric(stringr::str_remove(x, "K"))) * 1e3,
+    TRUE ~ suppressWarnings(as.numeric(x))
+  )
+}
+
+# Change % (ej. '4.91%' -> 4.91)
+limpiar_porcentaje <- function(x) {
+  x <- stringr::str_trim(stringr::str_remove(x, "%"))
+  suppressWarnings(as.numeric(x))
+}
+
+# Columnas numericas con posibles comas de miles (ej. '1,234.56')
+limpiar_numero <- function(x) {
+  suppressWarnings(as.numeric(stringr::str_remove_all(x, ",")))
+}
+
+df <- df %>%
+  dplyr::mutate(
+    Vol. = limpiar_volumen(Vol.),
+    `Change %` = limpiar_porcentaje(`Change %`),
+    Open = limpiar_numero(Open),
+    High = limpiar_numero(High),
+    Low = limpiar_numero(Low),
+    Price = limpiar_numero(Price)
+  )
+cat("Columnas numericas convertidas correctamente.\n")
+
+# --- 1.2.2 Eliminacion de filas duplicadas ---
+filas_antes <- nrow(df)
+df <- df %>%
+  dplyr::arrange(Ticker, Date) %>%
+  dplyr::distinct(Ticker, Date, .keep_all = TRUE)
+if (filas_antes - nrow(df) > 0) {
+  cat("Se eliminaron", filas_antes - nrow(df), "filas duplicadas (mismo Ticker y Date)\n")
+}
+
+# --- 1.2.3 Manejo de valores faltantes (interpolacion y eliminacion) ---
+na_antes_total <- sum(is.na(df))
+
+interpolar_columna <- function(x) {
+  if (sum(!is.na(x)) < 2) return(x)
+  zoo::na.approx(x, maxgap = 3, na.rm = FALSE)
+}
+
+df <- df %>%
+  dplyr::arrange(Ticker, Date) %>%
+  dplyr::group_by(Ticker) %>%
+  dplyr::mutate(dplyr::across(c(Open, High, Low, Price, Vol.), interpolar_columna)) %>%
+  dplyr::ungroup()
+
+na_despues_total <- sum(is.na(df))
+cat("NAs interpolados:", na_antes_total - na_despues_total, "valores completados\n")
+
+cols_criticas <- c("Date", "Open", "High", "Low", "Price", "Vol.")
+filas_antes <- nrow(df)
+df <- df %>% tidyr::drop_na(dplyr::all_of(cols_criticas))
+if (filas_antes - nrow(df) > 0) {
+  cat("Se eliminaron", filas_antes - nrow(df),
+      "filas con NA en columnas criticas tras la interpolacion\n")
+} else {
+  cat("No quedan NA en las columnas criticas de precio/volumen/fecha tras la interpolacion.\n")
+}
+
+# --- 1.2.4 Eliminacion de precios invalidos (negativos o cero) y volumenes negativos ---
+filas_antes <- nrow(df)
+df <- df %>%
+  dplyr::filter(Open > 0, High > 0, Low > 0, Price > 0, Vol. >= 0)
+if (filas_antes - nrow(df) > 0) {
+  cat("Se eliminaron", filas_antes - nrow(df),
+      "filas con precios invalidos (negativos o cero) o volumen negativo\n")
+}
+
+df <- df %>% dplyr::arrange(Ticker, Date)
+cat("\n--- Limpieza de Datos Completada ---\n")
+```
+
+## 1.3 Resultado esperado: data frame limpio almacenado en la base de datos "fondo"
+
+Guardamos el data frame ya limpio (precios OHLC, volumen y % de cambio por Ticker y Fecha) en la base de datos SQLite `fondo.db`, tabla `precios`. Esta tabla es la que alimentara el resto del analisis.
+
+```{r guardar-precios}
+cat("Data frame limpio (encabezado):\n")
+print(head(df))
+cat("Dimensiones finales del data frame limpio:", paste(dim(df), collapse = " x "), "\n")
+
+# --- Almacenamiento en SQLite ---
+con <- DBI::dbConnect(RSQLite::SQLite(), "fondo.db")
+DBI::dbWriteTable(con, "precios", df, overwrite = TRUE)
+DBI::dbDisconnect(con)
+cat("\nData frame guardado exitosamente en SQLite 'fondo.db' en la tabla 'precios'.\n")
+
+# --- Exportar a CSV de respaldo (al Escritorio) ---
+ruta_csv_respaldo <- file.path(ruta_escritorio, "cleaned_prices.csv")
+readr::write_csv(df, ruta_csv_respaldo)
+cat("Data frame de respaldo exportado a", ruta_csv_respaldo, "\n")
+```
+
+# 2. Identificacion de Variables Dependientes e Independientes (2 pts)
+
+Se parte de la tabla `precios` (ya limpia) y se calcula la variable dependiente (retorno diario) y 4 variables independientes, cada una justificada con una teoria financiera:
+
+| Variable | Tipo | Justificacion teorica |
+|---|---|---|
+| `Daily_Return` | Y (dependiente) | Retorno diario porcentual: es la variable que se busca explicar/predecir. |
+| `Rendimiento_Mercado` | X1 | CAPM (Sharpe, 1964): el retorno promedio del mercado (proxy: promedio de las 10 acciones) captura el riesgo sistematico que afecta a todos los activos. |
+| `Volatilidad_20d` | X2 | Teoria de portafolios de Markowitz: la desviacion estandar movil de 20 dias es la medida estandar de riesgo/varianza de un activo. |
+| `Volumen_Log` | X3 | Teoria de liquidez de mercado: el volumen (transformado con log para reducir asimetria) es un proxy de liquidez y de la informacion que absorbe el precio. |
+| `Momentum_10d` | X4 | Anomalias de mercado / efecto momentum (Jegadeesh & Titman, 1993): el retorno promedio de los ultimos 10 dias captura la persistencia de tendencias de corto plazo. |
+
+```{r variables}
+# Punto 2: Variables dependientes e independientes
+
+con <- DBI::dbConnect(RSQLite::SQLite(), "fondo.db")
+df <- DBI::dbReadTable(con, "precios")
+DBI::dbDisconnect(con)
+df$Date <- as.Date(df$Date)
+df <- df %>% dplyr::arrange(Ticker, Date)
+
+# Y: Daily_Return - retorno diario porcentual (variable dependiente), calculado sobre Price
+df <- df %>%
+  dplyr::group_by(Ticker) %>%
+  dplyr::mutate(Daily_Return = (Price / dplyr::lag(Price) - 1) * 100) %>%
+  dplyr::ungroup()
+
+# Marcamos retornos diarios atipicos (> 40% en valor absoluto) para la descripcion posterior
+umbral_atipico <- 40
+df <- df %>% dplyr::mutate(Is_Return_Outlier = abs(Daily_Return) > umbral_atipico)
+
+# X1: Rendimiento_Mercado - promedio diario de las 10 acciones (CAPM)
+mercado <- df %>%
+  dplyr::group_by(Date) %>%
+  dplyr::summarise(Rendimiento_Mercado = mean(Daily_Return, na.rm = TRUE), .groups = "drop")
+df <- df %>% dplyr::left_join(mercado, by = "Date")
+
+# X2: Volatilidad_20d - riesgo (desv. estandar movil de 20 dias, minimo 10 observaciones)
+rolling_sd <- function(x, ancho, min_obs) {
+  zoo::rollapply(x, width = ancho, align = "right", fill = NA, partial = TRUE,
+                 FUN = function(v) {
+                   v <- v[!is.na(v)]
+                   if (length(v) < min_obs) return(NA_real_)
+                   stats::sd(v)
+                 })
+}
+
+df <- df %>%
+  dplyr::group_by(Ticker) %>%
+  dplyr::mutate(Volatilidad_20d = rolling_sd(Daily_Return, 20, 10)) %>%
+  dplyr::ungroup()
+
+# X3: Volumen_Log - liquidez (log del volumen)
+df <- df %>% dplyr::mutate(Volumen_Log = log1p(Vol.))
+
+# X4: Momentum_10d - anomalias de mercado (retorno promedio de 10 dias, minimo 5 observaciones)
+rolling_mean <- function(x, ancho, min_obs) {
+  zoo::rollapply(x, width = ancho, align = "right", fill = NA, partial = TRUE,
+                 FUN = function(v) {
+                   v <- v[!is.na(v)]
+                   if (length(v) < min_obs) return(NA_real_)
+                   mean(v)
+                 })
+}
+
+df <- df %>%
+  dplyr::group_by(Ticker) %>%
+  dplyr::mutate(Momentum_10d = rolling_mean(Daily_Return, 10, 5)) %>%
+  dplyr::ungroup()
+
+print(utils::tail(df[, c("Ticker", "Date", "Daily_Return", "Rendimiento_Mercado",
+                          "Volatilidad_20d", "Volumen_Log", "Momentum_10d")]))
+
+resumen <- tibble::tribble(
+  ~Variable,             ~Tipo, ~Justificacion,
+  "Daily_Return",        "Y",   "Retorno diario a explicar/predecir",
+  "Rendimiento_Mercado",  "X1",  "CAPM: riesgo sistematico de mercado",
+  "Volatilidad_20d",     "X2",  "Varianza como medida de riesgo",
+  "Volumen_Log",         "X3",  "Liquidez de mercado",
+  "Momentum_10d",        "X4",  "Anomalia de mercado / momentum"
+)
+print(resumen)
+
+con <- DBI::dbConnect(RSQLite::SQLite(), "fondo.db")
+DBI::dbWriteTable(con, "variables_modelo", df, overwrite = TRUE)
+DBI::dbDisconnect(con)
+
+ruta_variables_csv <- file.path(ruta_escritorio, "variables_modelo.csv")
+readr::write_csv(df, ruta_variables_csv)
+cat("Guardado en fondo.db (tabla variables_modelo) y en", ruta_variables_csv, "\n")
+```
+
+# 3. Evaluacion de Tecnologias de Informacion (2 pts)
+
+Se compara Python, R y Excel con una matriz de criterios ponderados (automatizacion, integracion con APIs, Machine Learning, manejo de grandes datos y facilidad de uso), y se calcula el puntaje ganador.
+
+```{r tecnologias}
+# Punto 3: Evaluacion de tecnologias (Python vs R vs Excel)
+
+criterios <- tibble::tibble(
+  Criterio = c("Automatizacion", "Integracion con Interactive Brokers/APIs",
+               "Machine Learning", "Manejo de grandes datos", "Facilidad de uso"),
+  Peso   = c(0.25, 0.25, 0.25, 0.15, 0.10),
+  Python = c(5, 5, 5, 5, 3),
+  R      = c(4, 3, 3, 4, 3),
+  Excel  = c(1, 1, 1, 2, 5)
+)
+
+criterios <- criterios %>%
+  dplyr::mutate(
+    Python_pond = Python * Peso,
+    R_pond      = R * Peso,
+    Excel_pond  = Excel * Peso
+  )
+
+print(criterios)
+
+totales <- criterios %>%
+  dplyr::summarise(
+    Python_pond = sum(Python_pond),
+    R_pond      = sum(R_pond),
+    Excel_pond  = sum(Excel_pond)
+  )
+
+cat("\nPuntaje final (0-5):\n")
+print(totales)
+
+ganador <- names(totales)[which.max(as.numeric(totales[1, ]))]
+ganador <- stringr::str_remove(ganador, "_pond")
+cat("\nTecnologia seleccionada:", ganador, "\n")
+```
+
+**Justificacion:** Python gana por su ecosistema de Machine Learning, mayor facilidad de automatizacion y mejor manejo de grandes volumenes de datos, mientras que Excel no escala ni se automatiza bien, y R, aunque es fuerte en estadistica, queda por debajo en automatizacion y ML. Esta Entrega 1 se implementa en R por requerimiento del curso/equipo, pero la comparacion objetiva de tecnologias se mantiene sin alterar.
+
+# 4. Analisis del Perfil de Riesgo del Cliente (2 pts)
+
+Se define un cliente hipotetico (cuestionario de 5 preguntas), se calcula su perfil (Conservador/Moderado/Agresivo) y se sugiere que acciones del portafolio le convienen segun su volatilidad.
+
+```{r perfil-riesgo}
+# Punto 4: Perfil de riesgo del cliente
+
+# Cliente hipotetico (cuestionario simple, 1-5 c/u)
+cliente <- c(
+  "Horizonte de inversion (largo=5)"      = 4,
+  "Tolerancia a perdidas (alta=5)"        = 3,
+  "Estabilidad de ingresos (alta=5)"      = 4,
+  "Conocimiento financiero (alto=5)"      = 3,
+  "Objetivo (crecimiento=5, preservar=1)" = 4
+)
+
+puntaje <- mean(cliente)
+
+perfil <- dplyr::case_when(
+  puntaje < 2.5 ~ "Conservador",
+  puntaje < 3.8 ~ "Moderado",
+  TRUE ~ "Agresivo"
+)
+
+cat(sprintf("Puntaje promedio: %.2f -> Perfil: %s\n", puntaje, perfil))
+
+# Adaptar el portafolio segun el perfil, usando la volatilidad ya calculada
+con <- DBI::dbConnect(RSQLite::SQLite(), "fondo.db")
+vol <- DBI::dbGetQuery(con, "SELECT Ticker, Volatilidad_20d FROM variables_modelo")
+DBI::dbDisconnect(con)
+
+vol_prom <- vol %>%
+  dplyr::group_by(Ticker) %>%
+  dplyr::summarise(Volatilidad_20d = mean(Volatilidad_20d, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::arrange(Volatilidad_20d)
+
+if (perfil == "Conservador") {
+  seleccion <- utils::head(vol_prom, 5)
+} else if (perfil == "Agresivo") {
+  seleccion <- utils::tail(vol_prom, 5)
+} else {
+  seleccion <- vol_prom  # las 10, sin filtrar
+}
+
+cat("\nAcciones sugeridas para perfil", perfil, "(por volatilidad):\n")
+print(seleccion)
+```
+
+El cliente hipotetico obtuvo un puntaje de 3.60/5, lo que lo ubica en un perfil Moderado.
+
+Se muestran las 10 acciones ordenadas por volatilidad, para que el asesor pueda diversificar y ponderar en vez de excluir.
+
+Para este cliente Moderado, la recomendacion natural es un portafolio balanceado, sobreponderando las acciones defensivas de baja volatilidad y usando las de semiconductores en menor proporcion como complemento de crecimiento, en vez de concentrarse en un solo extremo del espectro de riesgo.
+
+# 5. Primera Visualizacion y Descripcion de los Datos (2 pts)
+
+Evolucion de precios (base 100, por accion), distribucion de retornos diarios (por accion), retorno acumulado del portafolio, y riesgo vs. retorno anualizado.
+
+```{r visualizacion}
+# Punto 5: Visualizacion inicial (acciones y portafolio)
+
+con <- DBI::dbConnect(RSQLite::SQLite(), "fondo.db")
+df <- DBI::dbReadTable(con, "variables_modelo")
+DBI::dbDisconnect(con)
+df$Date <- as.Date(df$Date)
+
+# 1. Evolucion de precios normalizada (base 100) - por accion
+precios_norm <- df %>%
+  dplyr::arrange(Ticker, Date) %>%
+  dplyr::group_by(Ticker) %>%
+  dplyr::mutate(Precio_Norm = Price / dplyr::first(Price) * 100) %>%
+  dplyr::ungroup()
+
+p1 <- ggplot2::ggplot(precios_norm, ggplot2::aes(x = Date, y = Precio_Norm, color = Ticker)) +
+  ggplot2::geom_line(linewidth = 0.7) +
+  ggplot2::labs(title = "Evolucion de precios (base 100)", x = NULL, y = "Precio (base 100)") +
+  ggplot2::theme_minimal()
+print(p1)
+ggplot2::ggsave(file.path(ruta_escritorio, "01_precios.png"), p1, width = 10, height = 5, dpi = 150)
+
+# 2. Distribucion de retornos diarios - por accion (small multiples)
+p2 <- ggplot2::ggplot(df %>% dplyr::filter(!is.na(Daily_Return)), ggplot2::aes(x = Daily_Return)) +
+  ggplot2::geom_histogram(bins = 30, fill = "steelblue") +
+  ggplot2::facet_wrap(~ Ticker, scales = "free_y") +
+  ggplot2::labs(title = "Distribucion de retornos diarios por accion",
+                x = "Retorno diario (%)", y = "Frecuencia") +
+  ggplot2::theme_minimal()
+print(p2)
+ggplot2::ggsave(file.path(ruta_escritorio, "02_distribucion_retornos.png"), p2, width = 15, height = 5, dpi = 150)
+
+# 3. Retorno acumulado del portafolio (equal-weighted, via Rendimiento_Mercado)
+portafolio <- df %>%
+  dplyr::distinct(Date, Rendimiento_Mercado) %>%
+  dplyr::arrange(Date) %>%
+  dplyr::mutate(Retorno_Acumulado = cumprod(1 + Rendimiento_Mercado / 100))
+
+p3 <- ggplot2::ggplot(portafolio, ggplot2::aes(x = Date, y = Retorno_Acumulado)) +
+  ggplot2::geom_line(color = "#1b9e77", linewidth = 1) +
+  ggplot2::labs(title = "Retorno acumulado del portafolio (10 acciones, ponderacion igual)",
+                x = NULL, y = "Retorno acumulado") +
+  ggplot2::theme_minimal()
+print(p3)
+ggplot2::ggsave(file.path(ruta_escritorio, "03_portafolio_acumulado.png"), p3, width = 10, height = 4, dpi = 150)
+
+# 4. Riesgo vs retorno por accion (anualizado)
+resumen_riesgo <- df %>%
+  dplyr::group_by(Ticker) %>%
+  dplyr::summarise(
+    Retorno_Anual = mean(Daily_Return, na.rm = TRUE) * 252,
+    Volatilidad_Anual = stats::sd(Daily_Return, na.rm = TRUE) * sqrt(252),
+    .groups = "drop"
+  )
+
+p4 <- ggplot2::ggplot(resumen_riesgo, ggplot2::aes(x = Volatilidad_Anual, y = Retorno_Anual, label = Ticker)) +
+  ggplot2::geom_point(color = "#d95f02", size = 3) +
+  ggplot2::geom_text(vjust = -0.8, size = 3) +
+  ggplot2::labs(title = "Riesgo vs. retorno por accion",
+                x = "Volatilidad anualizada (%)", y = "Retorno anualizado (%)") +
+  ggplot2::theme_minimal()
+print(p4)
+ggplot2::ggsave(file.path(ruta_escritorio, "04_riesgo_retorno.png"), p4, width = 7, height = 6, dpi = 150)
+
+cat("Graficos guardados en el Escritorio: 01_precios.png, 02_distribucion_retornos.png,",
+    "03_portafolio_acumulado.png, 04_riesgo_retorno.png\n")
+```
+
+Precios: el portafolio esta dominado por Micron e Intel, que se disparan a partir de finales de 2025, mientras Apple, Coca-Cola, Meta, Microsoft y Walmart se mantienen casi planos.
+
+Distribucion de retornos: todas centradas en 0 con forma de campana, pero Micron, Intel y AMD tienen colas mas anchas consistente con ser las mas riesgosas mientras Apple, Coca-Cola y Microsoft son mucho mas angostas.
+
+Portafolio acumulado: crece de 1.0 a ~2.6, con el salto fuerte justo cuando despegan Micron/Intel el rendimiento del portafolio esta siendo "jalado" por esas dos acciones, no por diversificacion real.
+
+Riesgo-retorno: confirma todo lo anterior Micron e Intel estan arriba a la derecha, el resto de defensivas (Coca-Cola, Microsoft, Walmart) abajo a la izquierda. No hay ninguna accion "ideal" (bajo riesgo + alto retorno).
