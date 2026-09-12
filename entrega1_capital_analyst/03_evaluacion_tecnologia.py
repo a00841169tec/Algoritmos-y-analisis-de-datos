@@ -2,12 +2,12 @@
 # Usa pd ya importado en la celda 2 del notebook.
 
 criterios = pd.DataFrame({
-    "Criterio": ["Automatizacion", "Integracion con Interactive Brokers/APIs",
-                 "Machine Learning", "Manejo de grandes datos", "Facilidad de uso"],
-    "Peso": [0.25, 0.25, 0.25, 0.15, 0.10],
-    "Python": [5, 5, 5, 5, 3],
-    "R":      [4, 3, 3, 4, 3],
-    "Excel":  [1, 1, 1, 2, 5],
+    "Criterio": ["Automatizacion", "Machine Learning",
+                 "Manejo de grandes datos", "Facilidad de uso"],
+    "Peso": [0.30, 0.30, 0.25, 0.15],
+    "Python": [5, 5, 5, 3],
+    "R":      [4, 3, 4, 3],
+    "Excel":  [1, 1, 2, 5],
 })
 
 for col in ["Python", "R", "Excel"]:
