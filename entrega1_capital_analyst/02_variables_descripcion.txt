@@ -1,0 +1,2 @@
+Calcula la variable dependiente (retorno diario) y 4 independientes:
+rendimiento de mercado, volatilidad, volumen y momentum. Guarda todo en fondo.db.
